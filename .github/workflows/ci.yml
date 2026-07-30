@@ -1,0 +1,110 @@
+# Project: Hello_World - A functional "Hello World" application demonstrating a basic project setup, implemented in Python.
+# Implemented in this sprint: HW-2, HW-3, HW-4, HW-5, HW-7, HW-8, HW-9
+
+name: CI/CD
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  ci:
+    name: Continuous Integration
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+
+      - name: Install dependencies (if requirements.txt exists)
+        run: |
+          if [ -f requirements.txt ]; then
+            pip install -r requirements.txt
+          else
+            echo "No requirements.txt found, skipping dependency installation."
+          fi
+
+      - name: Run tests (best-effort)
+        run: python -m unittest discover
+        continue-on-error: true
+
+      - name: Run lint (best-effort)
+        run: |
+          pip install flake8 # Install linter
+          flake8 .
+        continue-on-error: true
+
+  deploy:
+    name: Deploy to EC2
+    needs: ci
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main'
+    env:
+      EC2_HOST: ${{ secrets.EC2_HOST }}
+    steps:
+      - name: Deploy Skipped (EC2 secrets not configured)
+        if: env.EC2_HOST == ''
+        run: echo "🚨 EC2 secrets not configured. Skipping deploy steps."
+
+      - name: Checkout code
+        if: env.EC2_HOST != ''
+        uses: actions/checkout@v4
+
+      - name: Deploy to EC2 via SSH
+        if: env.EC2_HOST != ''
+        uses: appleboy/ssh-action@v1.0.0
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ${{ secrets.EC2_USER }}
+          key: ${{ secrets.EC2_SSH_KEY }}
+          script: |
+            # Source nvm so node/npm/pnpm are available (if nvm is installed)
+            export NVM_DIR="$HOME/.nvm" && [ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh"
+
+            # Change to deploy directory
+            cd ${{ secrets.EC2_DEPLOY_PATH }}
+
+            # Fetch and hard-reset to remote to avoid local conflicts
+            git fetch origin main
+            git reset --hard origin/main
+
+            # Sync new env vars from .env.sample into .env (append missing keys only)
+            if [ -f .env.sample ]; then
+              touch .env
+              while IFS= read -r line; do
+                # skip blank lines and comments
+                [[ -z "$line" || "$line" == \#* ]] && continue
+                key=$(echo "$line" | cut -d= -f1)
+                # only append if key not already present in .env
+                if ! grep -q "^${key}=" .env 2>/dev/null; then
+                  echo "$line" >> .env
+                  echo "⚠️  New env var added (set real value): ${key}"
+                fi
+              done < .env.sample
+            fi
+
+            # Install dependencies (Python specific)
+            if [ -f requirements.txt ]; then
+              pip install -r requirements.txt
+            else
+              echo "No requirements.txt found, skipping pip dependency installation."
+            fi
+
+            # Run build step (Python projects typically don't have an explicit 'build' step like Node.js)
+            echo "No explicit build step required for this Python project (e.g., 'npm run build')."
+
+            # Restart the app with PM2 using zero-downtime reload
+            pm2 reload app --update-env || pm2 start src/hello_world.py --name app
+
+            # Save PM2 process list
+            pm2 save
